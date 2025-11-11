@@ -104,4 +104,9 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+  // Multi-level feedback queue scheduling state.
+  int queue_level;             // Current MLFQ level (0 is highest).
+  int ticks_in_level;          // Ticks consumed in the current level.
+  uint64 queue_stamp;          // Monotonic stamp for round-robin ordering.
 };

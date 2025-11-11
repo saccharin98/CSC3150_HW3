@@ -6,6 +6,19 @@
 #include "proc.h"
 #include "defs.h"
 
+#define MLFQ_LEVELS 3
+static const int mlfq_slices[MLFQ_LEVELS] = {3, 6, 12};
+#define MLFQ_BOOST_INTERVAL 100
+
+static uint64 mlfq_enqueue_counter = 0;
+static uint64 mlfq_tick_counter = 0;
+static volatile int mlfq_need_boost = 0;
+
+static uint64 next_mlfq_stamp(void);
+static void mlfq_requeue_locked(struct proc *p);
+static void mlfq_try_boost(void);
+static void mlfq_apply_boost(void);
+
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
@@ -25,6 +38,45 @@ extern char trampoline[]; // trampoline.S
 // memory model when using p->parent.
 // must be acquired before any p->lock.
 struct spinlock wait_lock;
+
+static uint64
+next_mlfq_stamp(void)
+{
+  return __sync_fetch_and_add(&mlfq_enqueue_counter, 1);
+}
+
+static void
+mlfq_requeue_locked(struct proc *p)
+{
+  p->ticks_in_level = 0;
+  p->queue_stamp = next_mlfq_stamp();
+}
+
+static void
+mlfq_apply_boost(void)
+{
+  struct proc *p;
+
+  for(p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if(p->state != UNUSED) {
+      p->queue_level = 0;
+      p->ticks_in_level = 0;
+      if(p->state == RUNNABLE) {
+        p->queue_stamp = next_mlfq_stamp();
+      }
+    }
+    release(&p->lock);
+  }
+}
+
+static void
+mlfq_try_boost(void)
+{
+  if(__sync_lock_test_and_set(&mlfq_need_boost, 0)) {
+    mlfq_apply_boost();
+  }
+}
 
 // Allocate a page for each process's kernel stack.
 // Map it high in memory, followed by an invalid
@@ -146,6 +198,10 @@ found:
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
+  p->queue_level = 0;
+  p->ticks_in_level = 0;
+  p->queue_stamp = next_mlfq_stamp();
+
   return p;
 }
 
@@ -169,6 +225,9 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  p->queue_level = 0;
+  p->ticks_in_level = 0;
+  p->queue_stamp = 0;
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -227,6 +286,7 @@ userinit(void)
   p->cwd = namei("/");
 
   p->state = RUNNABLE;
+  mlfq_requeue_locked(p);
 
   release(&p->lock);
 }
@@ -300,6 +360,7 @@ kfork(void)
 
   acquire(&np->lock);
   np->state = RUNNABLE;
+  mlfq_requeue_locked(np);
   release(&np->lock);
 
   return pid;
@@ -437,28 +498,44 @@ scheduler(void)
     intr_on();
     intr_off();
 
-    int found = 0;
+    mlfq_try_boost();
+
+    struct proc *chosen = 0;
+    int best_level = MLFQ_LEVELS;
+    uint64 best_stamp = 0;
+
     for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
       if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
+        int level = p->queue_level;
+        uint64 stamp = p->queue_stamp;
+        if(chosen == 0 || level < best_level ||
+           (level == best_level && stamp < best_stamp)) {
+          chosen = p;
+          best_level = level;
+          best_stamp = stamp;
+        }
+      }
+      release(&p->lock);
+    }
+
+    if(chosen) {
+      acquire(&chosen->lock);
+      if(chosen->state == RUNNABLE) {
+        chosen->state = RUNNING;
+        c->proc = chosen;
+        swtch(&c->context, &chosen->context);
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
         c->proc = 0;
-        found = 1;
       }
-      release(&p->lock);
+      release(&chosen->lock);
+      continue;
     }
-    if(found == 0) {
-      // nothing to run; stop running on this core until an interrupt.
-      asm volatile("wfi");
-    }
+
+    // nothing to run; stop running on this core until an interrupt.
+    asm volatile("wfi");
   }
 }
 
@@ -496,8 +573,47 @@ yield(void)
   struct proc *p = myproc();
   acquire(&p->lock);
   p->state = RUNNABLE;
+  mlfq_requeue_locked(p);
   sched();
   release(&p->lock);
+}
+
+int
+sched_tick(void)
+{
+  int yield_now = 0;
+  struct proc *p = myproc();
+
+  if(cpuid() == 0) {
+    uint64 t = __sync_add_and_fetch(&mlfq_tick_counter, 1);
+    if(t % MLFQ_BOOST_INTERVAL == 0) {
+      __sync_lock_test_and_set(&mlfq_need_boost, 1);
+      if(p != 0)
+        yield_now = 1;
+    }
+  }
+
+  if(p == 0)
+    return yield_now;
+
+  if(mlfq_need_boost)
+    yield_now = 1;
+
+  acquire(&p->lock);
+  if(p->state == RUNNING) {
+    p->ticks_in_level++;
+    int slice = mlfq_slices[p->queue_level];
+    if(p->ticks_in_level >= slice) {
+      if(p->queue_level < MLFQ_LEVELS - 1) {
+        p->queue_level++;
+      }
+      p->ticks_in_level = 0;
+      p->queue_stamp = next_mlfq_stamp();
+      yield_now = 1;
+    }
+  }
+  release(&p->lock);
+  return yield_now;
 }
 
 // A fork child's very first scheduling by scheduler()
@@ -580,6 +696,7 @@ wakeup(void *chan)
       acquire(&p->lock);
       if(p->state == SLEEPING && p->chan == chan) {
         p->state = RUNNABLE;
+        mlfq_requeue_locked(p);
       }
       release(&p->lock);
     }
@@ -601,6 +718,7 @@ kkill(int pid)
       if(p->state == SLEEPING){
         // Wake process from sleep().
         p->state = RUNNABLE;
+        mlfq_requeue_locked(p);
       }
       release(&p->lock);
       return 0;
