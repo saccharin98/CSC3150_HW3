@@ -25,8 +25,8 @@ void cpu_worker(int id, int duration) {
     for (int i = 0; i < work_units; i++) {
         busy_wait(1000*work_units); 
         if (i % 100 == 0) {
-            //printf("[OBSERVE] PID %d completed %d/%d work units\n", 
-            //              pid, i, work_units);
+            printf("[OBSERVE] PID %d completed %d/%d work units\n", 
+                          pid, i, work_units);
         }
     }
     
@@ -44,11 +44,11 @@ void io_worker(int id, int duration) {
     
     for (int i = 0; i < io_operations; i++) {
         busy_wait(50);   
-        //printf("[OBSERVE] PID %d completed CPU operation %d/%d\n", 
-        //              pid, i + 1, io_operations);
+        printf("[OBSERVE] PID %d completed CPU operation %d/%d\n", 
+                      pid, i + 1, io_operations);
         pause(1);        
-        //printf("[OBSERVE] PID %d completed IO operation %d/%d\n", 
-        //              pid, i + 1, io_operations);
+        printf("[OBSERVE] PID %d completed IO operation %d/%d\n", 
+                      pid, i + 1, io_operations);
     }
     
     printf("[TEST] PID %d (IO Worker %d) completed all %d IO operations\n", 
