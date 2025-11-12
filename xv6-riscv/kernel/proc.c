@@ -60,9 +60,13 @@ mlfq_apply_boost(void)
   for(p = proc; p < &proc[NPROC]; p++) {
     acquire(&p->lock);
     if(p->state != UNUSED) {
+      int old_level = p->queue_level;
       p->queue_level = 0;
       p->ticks_in_level = 0;
       if(p->state == RUNNABLE) {
+        if(old_level != 0) {
+          printf("process %d promoted to level %d\n", p->pid, p->queue_level);
+        }
         p->queue_stamp = next_mlfq_stamp();
       }
     }
@@ -605,7 +609,11 @@ sched_tick(void)
     int slice = mlfq_slices[p->queue_level];
     if(p->ticks_in_level >= slice) {
       if(p->queue_level < MLFQ_LEVELS - 1) {
+        int old_level = p->queue_level;
         p->queue_level++;
+        if(p->queue_level != old_level) {
+          printf("process %d demoted to level %d\n", p->pid, p->queue_level);
+        }
       }
       p->ticks_in_level = 0;
       p->queue_stamp = next_mlfq_stamp();
