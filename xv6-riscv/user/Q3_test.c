@@ -87,13 +87,13 @@ int main(int argc, char *argv[]) {
     printf("===============================================\n\n");
     
         printf("[TEST] Starting basic MLFQ test with mixed workloads\n");
-        if (fork() == 0) mixed_worker(1, 20000);    
-        // if (fork() == 0) io_worker(1, 2000);      
-        // if (fork() == 0) cpu_worker(1, 250000); 
-        // if (fork() == 0) cpu_worker(2, 180000);    
-        if (fork() == 0) mixed_worker(2, 20000);     
+        if (fork() == 0) cpu_worker(1, 200000);    
+         if (fork() == 0) io_worker(1, 2000);      
+         if (fork() == 0) cpu_worker(1, 250000); 
+         if (fork() == 0) cpu_worker(2, 180000);    
+        if (fork() == 0) io_worker(2, 2200);     
     int children = 0;
-    children = 2;
+    children = 5;
 
     
     printf("[TEST] Waiting for %d child processes to complete...\n", children);

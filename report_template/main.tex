@@ -16,11 +16,70 @@ The scheduler now follows a three-level MLFQ policy with explicit accounting for
 \subsection{Queue Hierarchy and Time Slices}
 Each runnable process carries a \texttt{queue\_level}, \texttt{ticks\_in\_level}, and \texttt{queue\_stamp}. New processes start in the highest-priority queue (level~0) with a short quantum to favor interactive responsiveness. Lower queues double the quantum (3, 6, and 12 ticks, respectively), allowing CPU-bound workloads to run longer while still being preemptible. The scheduler scans the process table on every scheduling decision, selecting the runnable process with the smallest queue level and, within that level, the oldest \texttt{queue\_stamp} to preserve round-robin fairness among peers.
 
+\begin{verbatim}
+#define MLFQ_LEVELS 3
+static const int mlfq_slices[MLFQ_LEVELS] = {3, 6, 12};
+
+for(p = proc; p < &proc[NPROC]; p++) {
+  if(p->state == RUNNABLE) {
+    int level = p->queue_level;
+    uint64 stamp = p->queue_stamp;
+    if(chosen == 0 || level < best_level ||
+       (level == best_level && stamp < best_stamp)) {
+      chosen = p;
+      best_level = level;
+      best_stamp = stamp;
+    }
+  }
+}
+\end{verbatim}
+
 \subsection{Timer-Driven Accounting}
 The timer interrupt path invokes \texttt{sched\_tick()}, which performs two tasks: it increments a global tick counter (only on CPU~0) and updates the currently running process's tick consumption. When a process exhausts its queue-specific quantum, it is demoted one level (unless already at the lowest queue), its tick counter is reset, and the \texttt{queue\_stamp} is refreshed so the process re-enters the round-robin order. The kernel prints diagnostic messages highlighting how many ticks remain in the current quantum and when demotions occur, aiding trace-based evaluation.
 
+\begin{verbatim}
+int sched_tick(void) {
+  if(cpuid() == 0) {
+    current_time = __sync_add_and_fetch(&mlfq_tick_counter, 1);
+    if(current_time % MLFQ_BOOST_INTERVAL == 0)
+      __sync_lock_test_and_set(&mlfq_need_boost, 1);
+  }
+
+  if(p && p->state == RUNNING) {
+    int queue = p->queue_level;
+    int slice = mlfq_slices[queue];
+    p->ticks_in_level++;
+    if(p->ticks_in_level >= slice) {
+      if(p->queue_level < MLFQ_LEVELS - 1)
+        p->queue_level++;
+      p->ticks_in_level = 0;
+      p->queue_stamp = next_mlfq_stamp();
+      yield_now = 1;
+    }
+  }
+}
+\end{verbatim}
+
 \subsection{Priority Boosting}
 To prevent starvation, \texttt{sched\_tick()} sets a global flag every 100 ticks instructing the scheduler to perform a system-wide boost. The scheduler checks this flag before scanning the process table and, if set, calls \texttt{mlfq\_apply\_boost()} to promote all used processes back to the highest queue with cleared tick counters. This ensures that long-lived CPU-bound processes eventually regain access to short quanta, giving interactive tasks an opportunity to preempt them.
+
+\begin{verbatim}
+static void mlfq_try_boost(void) {
+  if(__sync_lock_test_and_set(&mlfq_need_boost, 0))
+    mlfq_apply_boost();
+}
+
+static void mlfq_apply_boost(void) {
+  for(p = proc; p < &proc[NPROC]; p++) {
+    if(p->state != UNUSED) {
+      p->queue_level = 0;
+      p->ticks_in_level = 0;
+      if(p->state == RUNNABLE)
+        p->queue_stamp = next_mlfq_stamp();
+    }
+  }
+}
+\end{verbatim}
 
 \subsection{Kernel Interfaces and Data Structures}
 Several helper routines encapsulate the queue management logic:
@@ -30,6 +89,23 @@ Several helper routines encapsulate the queue management logic:
   \item \texttt{mlfq\_try\_boost()} atomically checks whether a boost is pending and, if so, invokes \texttt{mlfq\_apply\_boost()}.
 \end{itemize}
 The \texttt{struct proc} definition now stores the per-process MLFQ state fields, allowing the scheduler and wakeup paths to re-enqueue processes consistently. Yielding, wakeup, and kill routines reuse \texttt{mlfq\_requeue\_locked()} to minimize duplicated logic when a process transitions into the runnable state.
+
+\begin{verbatim}
+struct proc {
+  // ... existing fields ...
+  int queue_level;
+  int ticks_in_level;
+  uint64 queue_stamp;
+  uint64 creation_tick;
+  uint64 first_run_tick;
+  uint64 completion_tick;
+};
+
+static void mlfq_requeue_locked(struct proc *p) {
+  p->ticks_in_level = 0;
+  p->queue_stamp = next_mlfq_stamp();
+}
+\end{verbatim}
 
 \section{Environment and Execution [2']}
 Environment: Ubuntu 22.04 host system and Compiler: riscv64-linux-gnu-gcc
@@ -72,6 +148,36 @@ Execution result:
     \caption{round robin}  % 图片标题
     \label{fig:sample}  % 为图片设置标签，便于引用
 \end{figure}
+
+
+\section{Evaluation [3']}
+\subsection{Comparison with Original RR Scheduler}
+The following table is prepared for logging latency and throughput numbers when contrasting the baseline round-robin scheduler with the three-level MLFQ implementation. Fill in the cells with the observed metrics from your experiments.
+
+\begin{table}[h]
+    \centering
+    \begin{tabular}{lcc}
+        \hline
+        Metric & Original RR & 3-level Queue \\
+        \hline
+        Response Time (ticks)(PID 4) & 1 & 0 \\
+        Response Time (ticks)(PID 5) & 1 & 1 \\
+        Response Time (ticks)(PID 6) & 1 & 1 \\
+        Response Time (ticks)(PID 7) & 1 & 1 \\
+        Response Time (ticks)(PID 8) & 1 & 1 \\
+        Throughput(ticks) & 5 / 313 & 5 / 294 \\
+        \hline
+    \end{tabular}
+    \caption{Performance Comparison}
+    \label{tab:performance-comparison}
+\end{table}
+
+\section{Challenges and Solutions [2']}
+\textbf{Challenge: Coordinating timer-driven demotions with scheduler selection.} Initially, queue level updates happened during the timer interrupt without consistently holding the process lock, occasionally leaving runnable processes with mismatched queue metadata.\\
+\textbf{Solution:} The final version acquires \texttt{p->lock} inside \texttt{sched\_tick()} before touching \texttt{queue\_level}, \texttt{ticks\_in\_level}, or \texttt{queue\_stamp}. This serialization keeps scheduler decisions and timer bookkeeping in sync, preventing stale queue assignments.
+
+\textbf{Challenge: Avoiding starvation while preserving throughput for CPU-bound jobs.} Long-running workers demoted to the lowest queue could wait indefinitely when interactive tasks kept arriving at higher priorities.\\
+\textbf{Solution:} The \texttt{mlfq\_need\_boost} flag and \texttt{mlfq\_apply\_boost()} routine trigger a system-wide promotion every 100 ticks. By checking the flag before each scheduling pass, all runnable processes periodically regain top-level priority and a fresh time slice, ensuring progress for CPU-bound workloads.
 
 
 \section{Conclusion [2']}
