@@ -107,3 +107,17 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+uint64
+sys_schedreset(void)
+{
+  schedstats_reset();
+  return 0;
+}
+
+uint64
+sys_schedreport(void)
+{
+  schedstats_report();
+  return 0;
+}

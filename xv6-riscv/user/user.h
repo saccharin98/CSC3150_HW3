@@ -21,6 +21,8 @@ int mkdir(const char*);
 int chdir(const char*);
 int dup(int);
 int getpid(void);
+int schedreset(void);
+int schedreport(void);
 char* sys_sbrk(int,int);
 int pause(int);
 int uptime(void);

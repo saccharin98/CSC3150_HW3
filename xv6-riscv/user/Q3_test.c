@@ -83,13 +83,16 @@ int main(int argc, char *argv[]) {
     printf("=        Testing SECH under MLFQ            =\n");
     printf("===============================================\n");
     printf("===============================================\n\n");
-    
-        printf("[TEST] Starting basic MLFQ test with mixed workloads\n");
-        if (fork() == 0) cpu_worker(1, 200000);    
-        if (fork() == 0) io_worker(1, 2000);      
-        if (fork() == 0) cpu_worker(1, 250000); 
-        if (fork() == 0) cpu_worker(2, 180000);    
-        if (fork() == 0) io_worker(2, 2200);     
+
+    printf("[TEST] Starting basic MLFQ test with mixed workloads\n");
+    if (schedreset() < 0) {
+        printf("[TEST] Failed to reset scheduler statistics\n");
+    }
+    if (fork() == 0) cpu_worker(1, 200000);
+    if (fork() == 0) io_worker(1, 2000);
+    if (fork() == 0) cpu_worker(1, 250000);
+    if (fork() == 0) cpu_worker(2, 180000);
+    if (fork() == 0) io_worker(2, 2200);
     int children = 0;
     children = 5;
 
@@ -110,5 +113,6 @@ int main(int argc, char *argv[]) {
     printf("===============================================\n");
     printf("=           Processes completed: %d          =\n", completed);
     printf("===============================================\n\n");
+    schedreport();
     exit(0);
 }

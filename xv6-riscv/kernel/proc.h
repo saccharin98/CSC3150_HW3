@@ -109,4 +109,8 @@ struct proc {
   int queue_level;             // Current MLFQ level (0 is highest).
   int ticks_in_level;          // Ticks consumed in the current level.
   uint64 queue_stamp;          // Monotonic stamp for round-robin ordering.
+  uint64 creation_tick;        // Scheduler tick when the process was created.
+  uint64 first_run_tick;       // Scheduler tick when the process first ran.
+  uint64 completion_tick;      // Scheduler tick when the process exited.
+  uint64 stats_generation;     // Generation identifier for scheduler stats.
 };

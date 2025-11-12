@@ -15,10 +15,23 @@ static uint64 mlfq_enqueue_counter = 0;
 static uint64 mlfq_tick_counter = 0;
 static volatile int mlfq_need_boost = 0;
 
+static struct {
+  struct spinlock lock;
+  uint64 generation;
+  uint64 total_response_ticks;
+  uint64 completed_processes;
+  uint64 first_creation_tick;
+  uint64 last_completion_tick;
+} sched_stats;
+
 static uint64 next_mlfq_stamp(void);
 static void mlfq_requeue_locked(struct proc *p);
 static void mlfq_try_boost(void);
 static void mlfq_apply_boost(void);
+static uint64 read_sched_ticks(void);
+static void schedstats_record_creation(struct proc *p);
+static void schedstats_record_first_run(struct proc *p, uint64 now);
+static void schedstats_record_completion(struct proc *p, uint64 now);
 
 struct cpu cpus[NCPU];
 
@@ -44,6 +57,12 @@ static uint64
 next_mlfq_stamp(void)
 {
   return __sync_fetch_and_add(&mlfq_enqueue_counter, 1);
+}
+
+static uint64
+read_sched_ticks(void)
+{
+  return __sync_fetch_and_add(&mlfq_tick_counter, 0);
 }
 
 static void
@@ -76,6 +95,59 @@ mlfq_apply_boost(void)
 }
 
 static void
+schedstats_record_creation(struct proc *p)
+{
+  uint64 now = read_sched_ticks();
+
+  acquire(&sched_stats.lock);
+  p->creation_tick = now;
+  p->first_run_tick = 0;
+  p->completion_tick = 0;
+  p->stats_generation = sched_stats.generation;
+  if(sched_stats.first_creation_tick == 0 ||
+     now < sched_stats.first_creation_tick) {
+    sched_stats.first_creation_tick = now;
+  }
+  release(&sched_stats.lock);
+}
+
+static void
+schedstats_record_first_run(struct proc *p, uint64 now)
+{
+  if(p->first_run_tick != 0)
+    return;
+
+  p->first_run_tick = now;
+
+  acquire(&sched_stats.lock);
+  if(p->stats_generation == sched_stats.generation &&
+     now >= p->creation_tick) {
+    sched_stats.total_response_ticks += now - p->creation_tick;
+  }
+  release(&sched_stats.lock);
+}
+
+static void
+schedstats_record_completion(struct proc *p, uint64 now)
+{
+  p->completion_tick = now;
+
+  acquire(&sched_stats.lock);
+  if(p->stats_generation == sched_stats.generation) {
+    if(sched_stats.last_completion_tick == 0 ||
+       now > sched_stats.last_completion_tick) {
+      sched_stats.last_completion_tick = now;
+    }
+    if(sched_stats.first_creation_tick == 0 ||
+       p->creation_tick < sched_stats.first_creation_tick) {
+      sched_stats.first_creation_tick = p->creation_tick;
+    }
+    sched_stats.completed_processes++;
+  }
+  release(&sched_stats.lock);
+}
+
+static void
 mlfq_try_boost(void)
 {
   if(__sync_lock_test_and_set(&mlfq_need_boost, 0)) {
@@ -105,9 +177,15 @@ void
 procinit(void)
 {
   struct proc *p;
-  
+
   initlock(&pid_lock, "nextpid");
   initlock(&wait_lock, "wait_lock");
+  initlock(&sched_stats.lock, "schedstats");
+  sched_stats.generation = 1;
+  sched_stats.total_response_ticks = 0;
+  sched_stats.completed_processes = 0;
+  sched_stats.first_creation_tick = 0;
+  sched_stats.last_completion_tick = 0;
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
       p->state = UNUSED;
@@ -207,6 +285,7 @@ found:
   p->queue_level = 0;
   p->ticks_in_level = 0;
   p->queue_stamp = next_mlfq_stamp();
+  schedstats_record_creation(p);
 
   return p;
 }
@@ -234,6 +313,10 @@ freeproc(struct proc *p)
   p->queue_level = 0;
   p->ticks_in_level = 0;
   p->queue_stamp = 0;
+  p->creation_tick = 0;
+  p->first_run_tick = 0;
+  p->completion_tick = 0;
+  p->stats_generation = 0;
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -398,6 +481,9 @@ kexit(int status)
   if(p == initproc)
     panic("init exiting");
 
+  uint64 now = read_sched_ticks();
+  schedstats_record_completion(p, now);
+
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
     if(p->ofile[fd]){
@@ -530,6 +616,8 @@ scheduler(void)
     if(chosen) {
       acquire(&chosen->lock);
       if(chosen->state == RUNNABLE) {
+        uint64 now = read_sched_ticks();
+        schedstats_record_first_run(chosen, now);
         chosen->state = RUNNING;
         c->proc = chosen;
         swtch(&c->context, &chosen->context);
@@ -677,6 +765,63 @@ forkret(void)
   uint64 satp = MAKE_SATP(p->pagetable);
   uint64 trampoline_userret = TRAMPOLINE + (userret - trampoline);
   ((void (*)(uint64))trampoline_userret)(satp);
+}
+
+void
+schedstats_reset(void)
+{
+  acquire(&sched_stats.lock);
+  sched_stats.generation++;
+  sched_stats.total_response_ticks = 0;
+  sched_stats.completed_processes = 0;
+  sched_stats.first_creation_tick = 0;
+  sched_stats.last_completion_tick = 0;
+  release(&sched_stats.lock);
+}
+
+void
+schedstats_report(void)
+{
+  uint64 generation;
+  uint64 total_response;
+  uint64 completed;
+  uint64 first_tick;
+  uint64 last_tick;
+
+  acquire(&sched_stats.lock);
+  generation = sched_stats.generation;
+  total_response = sched_stats.total_response_ticks;
+  completed = sched_stats.completed_processes;
+  first_tick = sched_stats.first_creation_tick;
+  last_tick = sched_stats.last_completion_tick;
+  release(&sched_stats.lock);
+
+  if(completed == 0) {
+    printf("[SCHED] Generation %lu: no completed processes to report.\n",
+           (unsigned long)generation);
+    return;
+  }
+
+  uint64 avg_response = total_response / completed;
+  uint64 duration = (last_tick > first_tick) ? (last_tick - first_tick) : 0;
+
+  printf("[SCHED] Generation %lu summary:\n", (unsigned long)generation);
+  printf("[SCHED]   Completed processes: %lu\n", (unsigned long)completed);
+  printf("[SCHED]   Average response time: %lu ticks\n",
+         (unsigned long)avg_response);
+
+  if(duration == 0) {
+    printf("[SCHED]   Throughput: %lu processes (duration < 1 tick)\n",
+           (unsigned long)completed);
+    return;
+  }
+
+  uint64 throughput_milli = (completed * 1000) / duration;
+
+  printf("[SCHED]   Throughput: %lu.%03lu processes per tick (%lu ticks span)\n",
+         (unsigned long)(throughput_milli / 1000),
+         (unsigned long)(throughput_milli % 1000),
+         (unsigned long)duration);
 }
 
 // Sleep on channel chan, releasing condition lock lk.
