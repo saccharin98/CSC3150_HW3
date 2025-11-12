@@ -109,4 +109,7 @@ struct proc {
   int queue_level;             // Current MLFQ level (0 is highest).
   int ticks_in_level;          // Ticks consumed in the current level.
   uint64 queue_stamp;          // Monotonic stamp for round-robin ordering.
+  uint64 total_run_ticks;      // Total CPU ticks consumed.
+  uint64 last_scheduled_tick;  // Tick count when the process last started running.
+  int trace_mlfq;              // Whether scheduler trace logging is enabled.
 };
