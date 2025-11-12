@@ -22,6 +22,7 @@ static uint64 metrics_completed = 0;
 
 extern uint ticks;
 static uint64 sched_now(void);
+static void log_scheduling_event(struct proc *p);
 
 extern void forkret(void);
 static void freeproc(struct proc *p);
@@ -71,6 +72,16 @@ static uint64
 sched_now(void)
 {
   return (uint64)__sync_fetch_and_add(&ticks, 0);
+}
+
+static void
+log_scheduling_event(struct proc *p)
+{
+  uint64 current_time = sched_now();
+  int remaining = 0;
+
+  printf("PID %d ran at t = %lu, remaining ticks = %d.\n",
+         p->pid, current_time, remaining);
 }
 
 // Must be called with interrupts disabled,
@@ -498,6 +509,7 @@ scheduler(void)
         // before jumping back to us.
         if(p->first_run_tick == 0)
           p->first_run_tick = sched_now();
+        log_scheduling_event(p);
         p->state = RUNNING;
         c->proc = p;
         swtch(&c->context, &p->context);
