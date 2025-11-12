@@ -587,14 +587,17 @@ sched_tick(void)
 {
   int yield_now = 0;
   struct proc *p = myproc();
+  uint64 current_time;
 
   if(cpuid() == 0) {
-    uint64 t = __sync_add_and_fetch(&mlfq_tick_counter, 1);
-    if(t % MLFQ_BOOST_INTERVAL == 0) {
+    current_time = __sync_add_and_fetch(&mlfq_tick_counter, 1);
+    if(current_time % MLFQ_BOOST_INTERVAL == 0) {
       __sync_lock_test_and_set(&mlfq_need_boost, 1);
       if(p != 0)
         yield_now = 1;
     }
+  } else {
+    current_time = __sync_fetch_and_add(&mlfq_tick_counter, 0);
   }
 
   if(p == 0)
@@ -605,8 +608,18 @@ sched_tick(void)
 
   acquire(&p->lock);
   if(p->state == RUNNING) {
+    int queue = p->queue_level;
+    int slice = mlfq_slices[queue];
+
     p->ticks_in_level++;
-    int slice = mlfq_slices[p->queue_level];
+
+    int remaining = slice - p->ticks_in_level;
+    if(remaining < 0)
+      remaining = 0;
+
+    printf("PID %d ran at t = %lu in Q%d, remaining ticks = %d.\n",
+           p->pid, current_time, queue + 1, remaining);
+
     if(p->ticks_in_level >= slice) {
       if(p->queue_level < MLFQ_LEVELS - 1) {
         int old_level = p->queue_level;
