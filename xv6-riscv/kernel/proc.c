@@ -116,6 +116,16 @@ schedstats_record_creation(struct proc *p)
   p->first_run_tick = 0;
   p->completion_tick = 0;
   p->stats_generation = sched_stats.generation;
+  p->stats_index = -1;
+  if(sched_stats.record_count < NPROC) {
+    int slot = sched_stats.record_count++;
+    struct sched_proc_record *rec = &sched_stats.records[slot];
+    rec->pid = p->pid;
+    rec->creation_tick = now;
+    rec->first_run_tick = 0;
+    rec->completion_tick = 0;
+    p->stats_index = slot;
+  }
   if(sched_stats.first_creation_tick == 0 ||
      now < sched_stats.first_creation_tick) {
     sched_stats.first_creation_tick = now;
@@ -135,6 +145,12 @@ schedstats_record_first_run(struct proc *p, uint64 now)
   if(p->stats_generation == sched_stats.generation &&
      now >= p->creation_tick) {
     sched_stats.total_response_ticks += now - p->creation_tick;
+    if(p->stats_index >= 0 && p->stats_index < NPROC) {
+      struct sched_proc_record *rec = &sched_stats.records[p->stats_index];
+      if(rec->pid == p->pid && rec->first_run_tick == 0) {
+        rec->first_run_tick = now;
+      }
+    }
   }
   release(&sched_stats.lock);
 }
@@ -153,6 +169,14 @@ schedstats_record_completion(struct proc *p, uint64 now)
     if(sched_stats.first_creation_tick == 0 ||
        p->creation_tick < sched_stats.first_creation_tick) {
       sched_stats.first_creation_tick = p->creation_tick;
+    }
+    if(p->stats_index >= 0 && p->stats_index < NPROC) {
+      struct sched_proc_record *rec = &sched_stats.records[p->stats_index];
+      if(rec->pid == p->pid) {
+        rec->completion_tick = now;
+        if(rec->first_run_tick == 0)
+          rec->first_run_tick = p->first_run_tick;
+      }
     }
     sched_stats.completed_processes++;
     if(sched_stats.completed_count < SCHED_MAX_COMPLETED) {
@@ -214,6 +238,7 @@ procinit(void)
       initlock(&p->lock, "proc");
       p->state = UNUSED;
       p->kstack = KSTACK((int) (p - proc));
+      p->stats_index = -1;
   }
 }
 
@@ -341,6 +366,7 @@ freeproc(struct proc *p)
   p->first_run_tick = 0;
   p->completion_tick = 0;
   p->stats_generation = 0;
+  p->stats_index = -1;
 }
 
 // Create a user page table for a given process, with no user memory,
