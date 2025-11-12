@@ -15,10 +15,16 @@ static uint64 mlfq_enqueue_counter = 0;
 static uint64 mlfq_tick_counter = 0;
 static volatile int mlfq_need_boost = 0;
 
+static struct spinlock metrics_lock;
+static uint64 metrics_first_creation = 0;
+static uint64 metrics_last_completion = 0;
+static uint64 metrics_completed = 0;
+
 static uint64 next_mlfq_stamp(void);
 static void mlfq_requeue_locked(struct proc *p);
 static void mlfq_try_boost(void);
 static void mlfq_apply_boost(void);
+static uint64 mlfq_now(void);
 
 struct cpu cpus[NCPU];
 
@@ -44,6 +50,12 @@ static uint64
 next_mlfq_stamp(void)
 {
   return __sync_fetch_and_add(&mlfq_enqueue_counter, 1);
+}
+
+static uint64
+mlfq_now(void)
+{
+  return __sync_fetch_and_add(&mlfq_tick_counter, 0);
 }
 
 static void
@@ -108,6 +120,7 @@ procinit(void)
   
   initlock(&pid_lock, "nextpid");
   initlock(&wait_lock, "wait_lock");
+  initlock(&metrics_lock, "schedstats");
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
       p->state = UNUSED;
@@ -208,6 +221,11 @@ found:
   p->ticks_in_level = 0;
   p->queue_stamp = next_mlfq_stamp();
 
+  p->creation_tick = mlfq_now();
+  p->first_run_tick = 0;
+  p->completion_tick = 0;
+  p->metrics_counted = 0;
+
   return p;
 }
 
@@ -234,6 +252,10 @@ freeproc(struct proc *p)
   p->queue_level = 0;
   p->ticks_in_level = 0;
   p->queue_stamp = 0;
+  p->creation_tick = 0;
+  p->first_run_tick = 0;
+  p->completion_tick = 0;
+  p->metrics_counted = 0;
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -423,6 +445,7 @@ kexit(int status)
   acquire(&p->lock);
 
   p->xstate = status;
+  p->completion_tick = mlfq_now();
   p->state = ZOMBIE;
 
   release(&wait_lock);
@@ -461,6 +484,39 @@ kwait(uint64 addr)
             release(&wait_lock);
             return -1;
           }
+
+          uint64 response_ticks = 0;
+          if(pp->first_run_tick >= pp->creation_tick)
+            response_ticks = pp->first_run_tick - pp->creation_tick;
+
+          acquire(&metrics_lock);
+          if(!pp->metrics_counted) {
+            if(metrics_first_creation == 0 ||
+               pp->creation_tick < metrics_first_creation)
+              metrics_first_creation = pp->creation_tick;
+            if(pp->completion_tick > metrics_last_completion)
+              metrics_last_completion = pp->completion_tick;
+            metrics_completed++;
+            pp->metrics_counted = 1;
+          }
+          uint64 completed = metrics_completed;
+          uint64 first_tick = metrics_first_creation;
+          uint64 last_tick = metrics_last_completion;
+          release(&metrics_lock);
+
+          uint64 total_window = 0;
+          if(last_tick > first_tick)
+            total_window = last_tick - first_tick;
+          uint64 throughput_x10 = 0;
+          if(total_window == 0) {
+            throughput_x10 = completed * 100;
+          } else {
+            throughput_x10 = (completed * 100) / total_window;
+          }
+
+          printf("[SCHED] PID %d response time: %lu ticks, throughput: %lu.%lu procs/sec\n",
+                 pid, response_ticks, throughput_x10 / 10, throughput_x10 % 10);
+
           freeproc(pp);
           release(&pp->lock);
           release(&wait_lock);
@@ -530,6 +586,8 @@ scheduler(void)
     if(chosen) {
       acquire(&chosen->lock);
       if(chosen->state == RUNNABLE) {
+        if(chosen->first_run_tick == 0)
+          chosen->first_run_tick = mlfq_now();
         chosen->state = RUNNING;
         c->proc = chosen;
         swtch(&c->context, &chosen->context);
