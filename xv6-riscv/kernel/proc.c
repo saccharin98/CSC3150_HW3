@@ -499,12 +499,12 @@ kwait(uint64 addr)
             metrics_completed++;
             pp->metrics_counted = 1;
           }
-          uint64 completed = metrics_completed;
+          int completed = metrics_completed;
           uint64 first_tick = metrics_first_creation;
           uint64 last_tick = metrics_last_completion;
           release(&metrics_lock);
 
-          uint64 total_window = 0;
+          int total_window = 0;
           if(last_tick > first_tick)
             total_window = last_tick - first_tick;
 
