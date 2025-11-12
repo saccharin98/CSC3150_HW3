@@ -6,6 +6,29 @@
 #include "proc.h"
 #include "defs.h"
 
+#define MLFQ_LEVELS 3
+static const int mlfq_slices[MLFQ_LEVELS] = {3, 6, 12};
+#define MLFQ_BOOST_INTERVAL 100
+
+extern uint ticks;
+
+static volatile int mlfq_trace_procs = 0;
+static int mlfq_trace_header_printed = 0;
+
+
+static uint64 mlfq_enqueue_counter = 0;
+static uint64 mlfq_tick_counter = 0;
+static volatile int mlfq_need_boost = 0;
+
+static uint64 next_mlfq_stamp(void);
+static void mlfq_requeue_locked(struct proc *p);
+static void mlfq_try_boost(void);
+static void mlfq_apply_boost(void);
+static int mlfq_trace_enabled(struct proc *p);
+static void mlfq_trace_log_header(void);
+static void mlfq_trace_mark_exit(struct proc *p);
+static void mlfq_trace_log_boost(uint now);
+
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
@@ -25,6 +48,96 @@ extern char trampoline[]; // trampoline.S
 // memory model when using p->parent.
 // must be acquired before any p->lock.
 struct spinlock wait_lock;
+
+static uint64
+next_mlfq_stamp(void)
+{
+  return __sync_fetch_and_add(&mlfq_enqueue_counter, 1);
+}
+
+static void
+mlfq_requeue_locked(struct proc *p)
+{
+  p->ticks_in_level = 0;
+  p->queue_stamp = next_mlfq_stamp();
+}
+
+static void
+mlfq_apply_boost(void)
+{
+  struct proc *p;
+  uint now = ticks;
+
+  mlfq_trace_log_boost(now);
+
+  for(p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if(p->state != UNUSED) {
+      p->queue_level = 0;
+      p->ticks_in_level = 0;
+      if(p->state == RUNNABLE) {
+        p->queue_stamp = next_mlfq_stamp();
+      }
+    }
+    release(&p->lock);
+  }
+}
+
+static void
+mlfq_try_boost(void)
+{
+  if(__sync_lock_test_and_set(&mlfq_need_boost, 0)) {
+    mlfq_apply_boost();
+  }
+}
+
+static int
+mlfq_trace_enabled(struct proc *p)
+{
+  if(p == 0)
+    return 0;
+
+  if(p->trace_mlfq)
+    return 1;
+
+  if(strncmp(p->name, "Q3", 2) == 0) {
+    p->trace_mlfq = 1;
+    __sync_add_and_fetch(&mlfq_trace_procs, 1);
+    return 1;
+  }
+
+  return 0;
+}
+
+static void
+mlfq_trace_log_header(void)
+{
+  if(__sync_bool_compare_and_swap(&mlfq_trace_header_printed, 0, 1)) {
+    printf("=== Scheduler Test ===\n");
+  }
+}
+
+static void
+mlfq_trace_mark_exit(struct proc *p)
+{
+  if(p->trace_mlfq) {
+    p->trace_mlfq = 0;
+    if(__sync_sub_and_fetch(&mlfq_trace_procs, 1) == 0) {
+      mlfq_trace_log_header();
+      printf("=== Test Complete ===\n");
+      mlfq_trace_header_printed = 0;
+    }
+  }
+}
+
+static void
+mlfq_trace_log_boost(uint now)
+{
+  if(__sync_add_and_fetch(&mlfq_trace_procs, 0) > 0) {
+    mlfq_trace_log_header();
+    printf("[SCHED] global boost at t=%u\n", now);
+  }
+}
 
 // Allocate a page for each process's kernel stack.
 // Map it high in memory, followed by an invalid
@@ -146,6 +259,13 @@ found:
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
+  p->queue_level = 0;
+  p->ticks_in_level = 0;
+  p->queue_stamp = next_mlfq_stamp();
+  p->total_run_ticks = 0;
+  p->last_scheduled_tick = 0;
+  p->trace_mlfq = 0;
+
   return p;
 }
 
@@ -155,6 +275,8 @@ found:
 static void
 freeproc(struct proc *p)
 {
+  mlfq_trace_mark_exit(p);
+
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
@@ -169,6 +291,12 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  p->queue_level = 0;
+  p->ticks_in_level = 0;
+  p->queue_stamp = 0;
+  p->total_run_ticks = 0;
+  p->last_scheduled_tick = 0;
+  p->trace_mlfq = 0;
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -227,6 +355,7 @@ userinit(void)
   p->cwd = namei("/");
 
   p->state = RUNNABLE;
+  mlfq_requeue_locked(p);
 
   release(&p->lock);
 }
@@ -300,6 +429,7 @@ kfork(void)
 
   acquire(&np->lock);
   np->state = RUNNABLE;
+  mlfq_requeue_locked(np);
   release(&np->lock);
 
   return pid;
@@ -357,6 +487,15 @@ kexit(int status)
 
   p->xstate = status;
   p->state = ZOMBIE;
+  if(mlfq_trace_enabled(p)) {
+    uint now = ticks;
+    uint ran = (now >= p->last_scheduled_tick) ?
+               (now - p->last_scheduled_tick) : 0;
+    mlfq_trace_log_header();
+    printf("[CPU-%d] pid=%d exits at t=%u after %u ticks [total=%lu status=%d]\n",
+           cpuid(), p->pid, now, ran, (unsigned long)p->total_run_ticks, status);
+  }
+  mlfq_trace_mark_exit(p);
 
   release(&wait_lock);
 
@@ -437,28 +576,54 @@ scheduler(void)
     intr_on();
     intr_off();
 
-    int found = 0;
+    mlfq_try_boost();
+
+    struct proc *chosen = 0;
+    int best_level = MLFQ_LEVELS;
+    uint64 best_stamp = 0;
+
     for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
       if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
+        int level = p->queue_level;
+        uint64 stamp = p->queue_stamp;
+        if(chosen == 0 || level < best_level ||
+           (level == best_level && stamp < best_stamp)) {
+          chosen = p;
+          best_level = level;
+          best_stamp = stamp;
+        }
+      }
+      release(&p->lock);
+    }
+
+    if(chosen) {
+      acquire(&chosen->lock);
+      if(chosen->state == RUNNABLE) {
+        int trace = mlfq_trace_enabled(chosen);
+        uint now = ticks;
+        chosen->last_scheduled_tick = now;
+        if(trace) {
+          mlfq_trace_log_header();
+          printf("[CPU-%d] pid=%d (%s) starts at t=%u [Q%d elapsed=%d total=%lu]\n",
+                 cpuid(), chosen->pid, chosen->name, now,
+                 chosen->queue_level, chosen->ticks_in_level,
+                 (unsigned long)chosen->total_run_ticks);
+        }
+        chosen->state = RUNNING;
+        c->proc = chosen;
+        swtch(&c->context, &chosen->context);
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
         c->proc = 0;
-        found = 1;
       }
-      release(&p->lock);
+      release(&chosen->lock);
+      continue;
     }
-    if(found == 0) {
-      // nothing to run; stop running on this core until an interrupt.
-      asm volatile("wfi");
-    }
+
+    // nothing to run; stop running on this core until an interrupt.
+    asm volatile("wfi");
   }
 }
 
@@ -495,9 +660,67 @@ yield(void)
 {
   struct proc *p = myproc();
   acquire(&p->lock);
+  int trace = mlfq_trace_enabled(p);
+  uint now = ticks;
+  uint ran = (now >= p->last_scheduled_tick) ?
+             (now - p->last_scheduled_tick) : 0;
+  if(trace) {
+    mlfq_trace_log_header();
+    printf("[CPU-%d] pid=%d yields at t=%u after %u ticks [Q%d]\n",
+           cpuid(), p->pid, now, ran, p->queue_level);
+  }
   p->state = RUNNABLE;
+  mlfq_requeue_locked(p);
   sched();
   release(&p->lock);
+}
+
+int
+sched_tick(void)
+{
+  int yield_now = 0;
+  struct proc *p = myproc();
+
+  if(cpuid() == 0) {
+    uint64 t = __sync_add_and_fetch(&mlfq_tick_counter, 1);
+    if(t % MLFQ_BOOST_INTERVAL == 0) {
+      __sync_lock_test_and_set(&mlfq_need_boost, 1);
+      if(p != 0)
+        yield_now = 1;
+    }
+  }
+
+  if(p == 0)
+    return yield_now;
+
+  if(mlfq_need_boost)
+    yield_now = 1;
+
+  acquire(&p->lock);
+  if(p->state == RUNNING) {
+    p->ticks_in_level++;
+    p->total_run_ticks++;
+    int slice = mlfq_slices[p->queue_level];
+    if(p->ticks_in_level >= slice) {
+      int old_level = p->queue_level;
+      int new_level = old_level;
+      if(mlfq_trace_enabled(p)) {
+        mlfq_trace_log_header();
+        printf("[CPU-%d] pid=%d time slice expires at t=%u [Q%d->%d]\n",
+               cpuid(), p->pid, ticks, old_level,
+               old_level < MLFQ_LEVELS - 1 ? old_level + 1 : old_level);
+      }
+      if(old_level < MLFQ_LEVELS - 1) {
+        new_level = old_level + 1;
+      }
+      p->queue_level = new_level;
+      p->ticks_in_level = 0;
+      p->queue_stamp = next_mlfq_stamp();
+      yield_now = 1;
+    }
+  }
+  release(&p->lock);
+  return yield_now;
 }
 
 // A fork child's very first scheduling by scheduler()
@@ -557,6 +780,15 @@ sleep(void *chan, struct spinlock *lk)
   // Go to sleep.
   p->chan = chan;
   p->state = SLEEPING;
+  int trace = mlfq_trace_enabled(p);
+  uint now = ticks;
+  uint ran = (now >= p->last_scheduled_tick) ?
+             (now - p->last_scheduled_tick) : 0;
+  if(trace) {
+    mlfq_trace_log_header();
+    printf("[CPU-%d] pid=%d sleeps at t=%u after %u ticks [Q%d]\n",
+           cpuid(), p->pid, now, ran, p->queue_level);
+  }
 
   sched();
 
@@ -580,6 +812,12 @@ wakeup(void *chan)
       acquire(&p->lock);
       if(p->state == SLEEPING && p->chan == chan) {
         p->state = RUNNABLE;
+        mlfq_requeue_locked(p);
+        if(mlfq_trace_enabled(p)) {
+          mlfq_trace_log_header();
+          printf("[CPU-%d] pid=%d wakes at t=%u -> Q%d\n",
+                 cpuid(), p->pid, ticks, p->queue_level);
+        }
       }
       release(&p->lock);
     }
@@ -601,6 +839,7 @@ kkill(int pid)
       if(p->state == SLEEPING){
         // Wake process from sleep().
         p->state = RUNNABLE;
+        mlfq_requeue_locked(p);
       }
       release(&p->lock);
       return 0;
