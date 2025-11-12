@@ -32,7 +32,47 @@ Several helper routines encapsulate the queue management logic:
 The \texttt{struct proc} definition now stores the per-process MLFQ state fields, allowing the scheduler and wakeup paths to re-enqueue processes consistently. Yielding, wakeup, and kill routines reuse \texttt{mlfq\_requeue\_locked()} to minimize duplicated logic when a process transitions into the runnable state.
 
 \section{Environment and Execution [2']}
-All changes were developed and tested inside the provided xv6-riscv build environment. The kernel is compiled using the course-supplied \texttt{Makefile} with the default \texttt{riscv64-unknown-elf-gcc} toolchain. To observe the scheduler behavior, rebuild and launch xv6 with \texttt{make qemu} (optionally adding \texttt{CPUS=2} to exercise multi-CPU interactions). The console output includes the diagnostic messages emitted from \texttt{sched\_tick()}, showing queue assignments, remaining quantum, and promotion/demotion events that validate the correctness of the implementation.
+Environment: Ubuntu 22.04 host system and Compiler: riscv64-linux-gnu-gcc
+
+Execution: make clean, make qemu, Q3\_test \\
+Execution result: 
+\begin{figure}[h]  % 创建一个浮动体
+    \centering  % 图片居中
+    \includegraphics[width=\textwidth]{demote.png}  % 插入图片，并设置宽度为页面的一半
+    \caption{demote}  % 图片标题
+    \label{fig:sample}  % 为图片设置标签，便于引用
+\end{figure}
+\begin{figure}[h]  % 创建一个浮动体
+    \centering  % 图片居中
+    \includegraphics[width=\textwidth]{promote.png}  % 插入图片，并设置宽度为页面的一半
+    \caption{promote}  % 图片标题
+    \label{fig:sample}  % 为图片设置标签，便于引用
+\end{figure}
+\begin{figure}[h]  % 创建一个浮动体
+    \centering  % 图片居中
+    \includegraphics[width=\textwidth]{response_time_and_throughput.png}  % 插入图片，并设置宽度为页面的一半
+    \caption{response time and throughput}  % 图片标题
+    \label{fig:sample}  % 为图片设置标签，便于引用
+\end{figure}
+\begin{figure}[h]  % 创建一个浮动体
+    \centering  % 图片居中
+    \includegraphics[width=\textwidth]{single_cpu_test.png}  % 插入图片，并设置宽度为页面的一半
+    \caption{single cpu test}  % 图片标题
+    \label{fig:sample}  % 为图片设置标签，便于引用
+\end{figure}
+\begin{figure}[h]  % 创建一个浮动体
+    \centering  % 图片居中
+    \includegraphics[width=\textwidth]{mixed worker case.png}  % 插入图片，并设置宽度为页面的一半
+    \caption{mixed worker case}  % 图片标题
+    \label{fig:sample}  % 为图片设置标签，便于引用
+\end{figure}
+\begin{figure}[h]  % 创建一个浮动体
+    \centering  % 图片居中
+    \includegraphics[width=\textwidth]{round_robin.png}  % 插入图片，并设置宽度为页面的一半
+    \caption{round robin}  % 图片标题
+    \label{fig:sample}  % 为图片设置标签，便于引用
+\end{figure}
+
 
 \section{Conclusion [2']}
 Implementing the MLFQ scheduler required augmenting the process table structures, integrating timer-driven accounting, and carefully coordinating inter-CPU state through atomic flags. The resulting scheduler balances responsiveness and throughput while guaranteeing eventual access for long-running jobs. Through this assignment I deepened my understanding of xv6's context-switching pipeline, interrupt handling, and the design trade-offs behind practical feedback-based scheduling.

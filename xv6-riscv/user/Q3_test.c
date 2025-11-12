@@ -66,6 +66,8 @@ void mixed_worker(int id, int duration) {
     
     for (int i = 0; i < cycles; i++) {
         busy_wait(150);
+        printf("[PRIORITY] PID %d (Mixed Worker %d) completed cycle %d/%d\n", 
+                      pid, id, i + 1, cycles);
         pause(8);
         busy_wait(50);
     }
@@ -85,13 +87,13 @@ int main(int argc, char *argv[]) {
     printf("===============================================\n\n");
     
         printf("[TEST] Starting basic MLFQ test with mixed workloads\n");
-        if (fork() == 0) cpu_worker(1, 200000);    
-        if (fork() == 0) io_worker(1, 2000);      
-        if (fork() == 0) cpu_worker(1, 250000); 
-        if (fork() == 0) cpu_worker(2, 180000);    
-        if (fork() == 0) io_worker(2, 2200);     
+        if (fork() == 0) mixed_worker(1, 20000);    
+        // if (fork() == 0) io_worker(1, 2000);      
+        // if (fork() == 0) cpu_worker(1, 250000); 
+        // if (fork() == 0) cpu_worker(2, 180000);    
+        if (fork() == 0) mixed_worker(2, 20000);     
     int children = 0;
-    children = 5;
+    children = 2;
 
     
     printf("[TEST] Waiting for %d child processes to complete...\n", children);
