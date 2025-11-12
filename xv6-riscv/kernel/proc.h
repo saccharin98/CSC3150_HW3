@@ -81,6 +81,9 @@ struct trapframe {
 
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+#define NPRIORITY 3
+#define BOOST_INTERVAL 64
+
 // Per-process state
 struct proc {
   struct spinlock lock;
@@ -104,4 +107,9 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+  int priority;                // Current MLFQ level (0 is highest)
+  int slice_rem;               // Remaining ticks in current time slice
+  uint64 queue_stamp;          // Ordering key within the level
+  uint64 sched_ticks;          // Total ticks the process has run
 };

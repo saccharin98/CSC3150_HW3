@@ -26,6 +26,16 @@ extern char trampoline[]; // trampoline.S
 // must be acquired before any p->lock.
 struct spinlock wait_lock;
 
+static struct spinlock mlfq_lock;
+static uint64 mlfq_stamp;
+static uint64 mlfq_ticks;
+static const int mlfq_slices[NPRIORITY] = {1, 2, 4};
+
+static uint64 next_stamp(void);
+static void place_at_queue_tail(struct proc *p);
+static void reset_priority_locked(struct proc *p);
+static void boost_all(void);
+
 // Allocate a page for each process's kernel stack.
 // Map it high in memory, followed by an invalid
 // guard page.
@@ -48,13 +58,63 @@ void
 procinit(void)
 {
   struct proc *p;
-  
+
   initlock(&pid_lock, "nextpid");
   initlock(&wait_lock, "wait_lock");
+  initlock(&mlfq_lock, "mlfq");
+  mlfq_stamp = 0;
+  mlfq_ticks = 0;
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
       p->state = UNUSED;
       p->kstack = KSTACK((int) (p - proc));
+      p->priority = 0;
+      p->slice_rem = 0;
+      p->queue_stamp = 0;
+      p->sched_ticks = 0;
+  }
+}
+
+static uint64
+next_stamp(void)
+{
+  uint64 stamp;
+
+  acquire(&mlfq_lock);
+  stamp = mlfq_stamp++;
+  release(&mlfq_lock);
+
+  return stamp;
+}
+
+static void
+place_at_queue_tail(struct proc *p)
+{
+  p->queue_stamp = next_stamp();
+}
+
+static void
+reset_priority_locked(struct proc *p)
+{
+  p->priority = 0;
+  p->slice_rem = 0;
+  place_at_queue_tail(p);
+}
+
+static void
+boost_all(void)
+{
+  struct proc *p;
+
+  for(p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->state != UNUSED){
+      p->priority = 0;
+      p->slice_rem = 0;
+      if(p->state == RUNNABLE)
+        place_at_queue_tail(p);
+    }
+    release(&p->lock);
   }
 }
 
@@ -124,6 +184,10 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  p->priority = 0;
+  p->slice_rem = 0;
+  p->queue_stamp = 0;
+  p->sched_ticks = 0;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -168,6 +232,10 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  p->priority = 0;
+  p->slice_rem = 0;
+  p->queue_stamp = 0;
+  p->sched_ticks = 0;
   p->state = UNUSED;
 }
 
@@ -227,6 +295,7 @@ userinit(void)
   p->cwd = namei("/");
 
   p->state = RUNNABLE;
+  reset_priority_locked(p);
 
   release(&p->lock);
 }
@@ -300,6 +369,7 @@ kfork(void)
 
   acquire(&np->lock);
   np->state = RUNNABLE;
+  reset_priority_locked(np);
   release(&np->lock);
 
   return pid;
@@ -424,7 +494,6 @@ kwait(uint64 addr)
 void
 scheduler(void)
 {
-  struct proc *p;
   struct cpu *c = mycpu();
 
   c->proc = 0;
@@ -437,28 +506,46 @@ scheduler(void)
     intr_on();
     intr_off();
 
-    int found = 0;
-    for(p = proc; p < &proc[NPROC]; p++) {
-      acquire(&p->lock);
-      if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
+    struct proc *candidate = 0;
+    int candidate_level = -1;
 
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
-        found = 1;
+    for(int level = 0; level < NPRIORITY; level++) {
+      uint64 best_stamp = 0;
+      struct proc *best = 0;
+
+      for(struct proc *p = proc; p < &proc[NPROC]; p++) {
+        acquire(&p->lock);
+        if(p->state == RUNNABLE && p->priority == level) {
+          if(best == 0 || p->queue_stamp < best_stamp) {
+            if(best)
+              release(&best->lock);
+            best = p;
+            best_stamp = p->queue_stamp;
+            candidate_level = level;
+            continue;
+          }
+        }
+        release(&p->lock);
       }
-      release(&p->lock);
+
+      if(best) {
+        candidate = best;
+        break;
+      }
     }
-    if(found == 0) {
-      // nothing to run; stop running on this core until an interrupt.
-      asm volatile("wfi");
+
+    if(candidate) {
+      candidate->state = RUNNING;
+      candidate->slice_rem = mlfq_slices[candidate_level];
+      c->proc = candidate;
+      swtch(&c->context, &candidate->context);
+      c->proc = 0;
+      release(&candidate->lock);
+      continue;
     }
+
+    // nothing to run; stop running on this core until an interrupt.
+    asm volatile("wfi");
   }
 }
 
@@ -496,6 +583,8 @@ yield(void)
   struct proc *p = myproc();
   acquire(&p->lock);
   p->state = RUNNABLE;
+  p->slice_rem = 0;
+  place_at_queue_tail(p);
   sched();
   release(&p->lock);
 }
@@ -557,6 +646,7 @@ sleep(void *chan, struct spinlock *lk)
   // Go to sleep.
   p->chan = chan;
   p->state = SLEEPING;
+  p->slice_rem = 0;
 
   sched();
 
@@ -580,6 +670,8 @@ wakeup(void *chan)
       acquire(&p->lock);
       if(p->state == SLEEPING && p->chan == chan) {
         p->state = RUNNABLE;
+        p->slice_rem = 0;
+        place_at_queue_tail(p);
       }
       release(&p->lock);
     }
@@ -601,6 +693,8 @@ kkill(int pid)
       if(p->state == SLEEPING){
         // Wake process from sleep().
         p->state = RUNNABLE;
+        p->slice_rem = 0;
+        place_at_queue_tail(p);
       }
       release(&p->lock);
       return 0;
@@ -622,11 +716,50 @@ int
 killed(struct proc *p)
 {
   int k;
-  
+
   acquire(&p->lock);
   k = p->killed;
   release(&p->lock);
   return k;
+}
+
+void
+sched_tick(void)
+{
+  struct proc *p = myproc();
+
+  if(p == 0)
+    return;
+
+  acquire(&p->lock);
+  if(p->state == RUNNING){
+    p->sched_ticks++;
+    if(p->slice_rem > 0){
+      p->slice_rem--;
+      if(p->slice_rem == 0){
+        if(p->priority < NPRIORITY - 1)
+          p->priority++;
+        place_at_queue_tail(p);
+      }
+    }
+  }
+  release(&p->lock);
+}
+
+void
+sched_clock_tick(void)
+{
+  int trigger_boost = 0;
+
+  acquire(&mlfq_lock);
+  if(++mlfq_ticks >= BOOST_INTERVAL){
+    mlfq_ticks = 0;
+    trigger_boost = 1;
+  }
+  release(&mlfq_lock);
+
+  if(trigger_boost)
+    boost_all();
 }
 
 // Copy to either a user address, or kernel address,
