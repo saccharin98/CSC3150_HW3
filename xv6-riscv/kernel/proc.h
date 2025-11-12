@@ -113,4 +113,5 @@ struct proc {
   uint64 first_run_tick;       // Scheduler tick when the process first ran.
   uint64 completion_tick;      // Scheduler tick when the process exited.
   uint64 stats_generation;     // Generation identifier for scheduler stats.
+  int stats_index;             // Index into scheduler statistics table.
 };
