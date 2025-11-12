@@ -15,6 +15,15 @@ static uint64 mlfq_enqueue_counter = 0;
 static uint64 mlfq_tick_counter = 0;
 static volatile int mlfq_need_boost = 0;
 
+struct sched_completed_record {
+  int pid;
+  uint64 creation_tick;
+  uint64 first_run_tick;
+  uint64 completion_tick;
+};
+
+#define SCHED_MAX_COMPLETED (NPROC * 4)
+
 static struct {
   struct spinlock lock;
   uint64 generation;
@@ -22,6 +31,9 @@ static struct {
   uint64 completed_processes;
   uint64 first_creation_tick;
   uint64 last_completion_tick;
+  struct sched_completed_record completed[SCHED_MAX_COMPLETED];
+  int completed_count;
+  int completed_overflow;
 } sched_stats;
 
 static uint64 next_mlfq_stamp(void);
@@ -143,6 +155,16 @@ schedstats_record_completion(struct proc *p, uint64 now)
       sched_stats.first_creation_tick = p->creation_tick;
     }
     sched_stats.completed_processes++;
+    if(sched_stats.completed_count < SCHED_MAX_COMPLETED) {
+      struct sched_completed_record *rec =
+          &sched_stats.completed[sched_stats.completed_count++];
+      rec->pid = p->pid;
+      rec->creation_tick = p->creation_tick;
+      rec->first_run_tick = p->first_run_tick;
+      rec->completion_tick = now;
+    } else {
+      sched_stats.completed_overflow = 1;
+    }
   }
   release(&sched_stats.lock);
 }
@@ -186,6 +208,8 @@ procinit(void)
   sched_stats.completed_processes = 0;
   sched_stats.first_creation_tick = 0;
   sched_stats.last_completion_tick = 0;
+  sched_stats.completed_count = 0;
+  sched_stats.completed_overflow = 0;
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
       p->state = UNUSED;
@@ -776,6 +800,9 @@ schedstats_reset(void)
   sched_stats.completed_processes = 0;
   sched_stats.first_creation_tick = 0;
   sched_stats.last_completion_tick = 0;
+  sched_stats.completed_count = 0;
+  sched_stats.completed_overflow = 0;
+  memset(sched_stats.completed, 0, sizeof(sched_stats.completed));
   release(&sched_stats.lock);
 }
 
@@ -787,6 +814,9 @@ schedstats_report(void)
   uint64 completed;
   uint64 first_tick;
   uint64 last_tick;
+  struct sched_completed_record records[SCHED_MAX_COMPLETED];
+  int record_count;
+  int overflow_flag;
 
   acquire(&sched_stats.lock);
   generation = sched_stats.generation;
@@ -794,6 +824,13 @@ schedstats_report(void)
   completed = sched_stats.completed_processes;
   first_tick = sched_stats.first_creation_tick;
   last_tick = sched_stats.last_completion_tick;
+  record_count = sched_stats.completed_count;
+  if(record_count > SCHED_MAX_COMPLETED)
+    record_count = SCHED_MAX_COMPLETED;
+  if(record_count > 0)
+    memmove(records, sched_stats.completed,
+            record_count * sizeof(struct sched_completed_record));
+  overflow_flag = sched_stats.completed_overflow;
   release(&sched_stats.lock);
 
   if(completed == 0) {
@@ -809,6 +846,25 @@ schedstats_report(void)
   printf("[SCHED]   Completed processes: %lu\n", (unsigned long)completed);
   printf("[SCHED]   Average response time: %lu ticks\n",
          (unsigned long)avg_response);
+
+  if(record_count > 0) {
+    printf("[SCHED]   Per-process response times:\n");
+    for(int i = 0; i < record_count; i++) {
+      struct sched_completed_record *rec = &records[i];
+      uint64 response = 0;
+      if(rec->first_run_tick > rec->creation_tick)
+        response = rec->first_run_tick - rec->creation_tick;
+      printf("[SCHED]     PID %d: %lu ticks (created %lu, first run %lu, completed %lu)\n",
+             rec->pid,
+             (unsigned long)response,
+             (unsigned long)rec->creation_tick,
+             (unsigned long)rec->first_run_tick,
+             (unsigned long)rec->completion_tick);
+    }
+    if(overflow_flag) {
+      printf("[SCHED]     ... additional completed processes omitted ...\n");
+    }
+  }
 
   if(duration == 0) {
     printf("[SCHED]   Throughput: %lu processes (duration < 1 tick)\n",
