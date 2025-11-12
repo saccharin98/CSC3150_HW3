@@ -1,33 +1,40 @@
 \documentclass{article}
 \usepackage{graphicx, nips} % Required for inserting images
 
-\title{Assignment Report: Title}
-\author{Name - Student ID}
+\title{Assignment Report: xv6-RISCV Scheduler Enhancements}
+\author{Student Name -- Student ID}
 
 \begin{document}
 \maketitle
 
-
-Your report should follow the template with the following section structure.
-
-\textbf{No page limitation}
-
 \section{Introduction [2']}
-
-In the Introduction section, you are required to include a brief introduction about this asignment and your works.
-
+This assignment extends the xv6-riscv teaching operating system with a richer scheduler that more closely resembles modern multi-level feedback queue (MLFQ) designs. The work focused on shaping timer-driven preemption, dynamically adjusting priorities based on observed CPU consumption, and maintaining starvation-free progress for long-running and interactive workloads. In addition, the kernel data structures were augmented so that scheduling metadata is tracked per process alongside existing context, trapframe, and bookkeeping state.
 
 \section{Design [5']}
+The scheduler now follows a three-level MLFQ policy with explicit accounting for time slices, queue promotion and demotion, and periodic priority boosts. The subsections below describe each component in detail.
 
-In the Design section, you are required to include how you design your program.
+\subsection{Queue Hierarchy and Time Slices}
+Each runnable process carries a \texttt{queue\_level}, \texttt{ticks\_in\_level}, and \texttt{queue\_stamp}. New processes start in the highest-priority queue (level~0) with a short quantum to favor interactive responsiveness. Lower queues double the quantum (3, 6, and 12 ticks, respectively), allowing CPU-bound workloads to run longer while still being preemptible. The scheduler scans the process table on every scheduling decision, selecting the runnable process with the smallest queue level and, within that level, the oldest \texttt{queue\_stamp} to preserve round-robin fairness among peers.
+
+\subsection{Timer-Driven Accounting}
+The timer interrupt path invokes \texttt{sched\_tick()}, which performs two tasks: it increments a global tick counter (only on CPU~0) and updates the currently running process's tick consumption. When a process exhausts its queue-specific quantum, it is demoted one level (unless already at the lowest queue), its tick counter is reset, and the \texttt{queue\_stamp} is refreshed so the process re-enters the round-robin order. The kernel prints diagnostic messages highlighting how many ticks remain in the current quantum and when demotions occur, aiding trace-based evaluation.
+
+\subsection{Priority Boosting}
+To prevent starvation, \texttt{sched\_tick()} sets a global flag every 100 ticks instructing the scheduler to perform a system-wide boost. The scheduler checks this flag before scanning the process table and, if set, calls \texttt{mlfq\_apply\_boost()} to promote all used processes back to the highest queue with cleared tick counters. This ensures that long-lived CPU-bound processes eventually regain access to short quanta, giving interactive tasks an opportunity to preempt them.
+
+\subsection{Kernel Interfaces and Data Structures}
+Several helper routines encapsulate the queue management logic:
+\begin{itemize}
+  \item \texttt{next\_mlfq\_stamp()} returns a monotonic counter used to maintain FIFO ordering per queue level.
+  \item \texttt{mlfq\_requeue\_locked()} resets a process's tick counter and updates its \texttt{queue\_stamp} whenever it becomes runnable.
+  \item \texttt{mlfq\_try\_boost()} atomically checks whether a boost is pending and, if so, invokes \texttt{mlfq\_apply\_boost()}.
+\end{itemize}
+The \texttt{struct proc} definition now stores the per-process MLFQ state fields, allowing the scheduler and wakeup paths to re-enqueue processes consistently. Yielding, wakeup, and kill routines reuse \texttt{mlfq\_requeue\_locked()} to minimize duplicated logic when a process transitions into the runnable state.
 
 \section{Environment and Execution [2']}
-
-In the Environment and Execution section, you are required to include what is your program's running environment, how to execute your program, and use appropriate ways to show your program runs well.
+All changes were developed and tested inside the provided xv6-riscv build environment. The kernel is compiled using the course-supplied \texttt{Makefile} with the default \texttt{riscv64-unknown-elf-gcc} toolchain. To observe the scheduler behavior, rebuild and launch xv6 with \texttt{make qemu} (optionally adding \texttt{CPUS=2} to exercise multi-CPU interactions). The console output includes the diagnostic messages emitted from \texttt{sched\_tick()}, showing queue assignments, remaining quantum, and promotion/demotion events that validate the correctness of the implementation.
 
 \section{Conclusion [2']}
-
-In the Conclusion section, you are required to include a brief summary about this assignment and what you have learned from this assignment.
-
+Implementing the MLFQ scheduler required augmenting the process table structures, integrating timer-driven accounting, and carefully coordinating inter-CPU state through atomic flags. The resulting scheduler balances responsiveness and throughput while guaranteeing eventual access for long-running jobs. Through this assignment I deepened my understanding of xv6's context-switching pipeline, interrupt handling, and the design trade-offs behind practical feedback-based scheduling.
 
 \end{document}
