@@ -507,15 +507,9 @@ kwait(uint64 addr)
           uint64 total_window = 0;
           if(last_tick > first_tick)
             total_window = last_tick - first_tick;
-          uint64 throughput_x10 = 0;
-          if(total_window == 0) {
-            throughput_x10 = completed * 100;
-          } else {
-            throughput_x10 = (completed * 100) / total_window;
-          }
 
-          printf("[SCHED] PID %d response time: %lu ticks, throughput: %lu.%lu procs/sec\n",
-                 pid, response_ticks, throughput_x10 / 10, throughput_x10 % 10);
+          printf("[SCHED] PID %d response time: %lu ticks, throughput info: %d completed processes, %d total window length",
+                 pid, response_ticks, completed, total_window);
 
           freeproc(pp);
           release(&pp->lock);
