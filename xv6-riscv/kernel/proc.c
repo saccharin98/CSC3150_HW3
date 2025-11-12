@@ -618,7 +618,7 @@ sched_tick(void)
       remaining = 0;
 
     printf("PID %d ran at t = %lu in Q%d, remaining ticks = %d.\n",
-           p->pid, current_time, queue + 1, remaining);
+           p->pid, current_time, queue, remaining);
 
     if(p->ticks_in_level >= slice) {
       if(p->queue_level < MLFQ_LEVELS - 1) {
