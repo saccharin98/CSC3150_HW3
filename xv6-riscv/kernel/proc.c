@@ -6,6 +6,7 @@
 #include "proc.h"
 #include "defs.h"
 
+// Added for CSC3150 HW3: multi-level feedback queue scheduler state.
 #define MLFQ_LEVELS 3
 static const int mlfq_slices[MLFQ_LEVELS] = {3, 6, 12};
 #define MLFQ_BOOST_INTERVAL 100
@@ -202,6 +203,7 @@ found:
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
+  // Initialize MLFQ bookkeeping for new processes.
   p->queue_level = 0;
   p->ticks_in_level = 0;
   p->queue_stamp = next_mlfq_stamp();
@@ -502,12 +504,14 @@ scheduler(void)
     intr_on();
     intr_off();
 
+    // MLFQ-specific periodic priority boost hook.
     mlfq_try_boost();
 
     struct proc *chosen = 0;
     int best_level = MLFQ_LEVELS;
     uint64 best_stamp = 0;
 
+    // Select the runnable process from the highest-priority MLFQ queue.
     for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
       if(p->state == RUNNABLE) {
@@ -589,6 +593,7 @@ sched_tick(void)
   struct proc *p = myproc();
   uint64 current_time;
 
+  // Added to drive MLFQ accounting and periodic boosts from the timer.
   if(cpuid() == 0) {
     current_time = __sync_add_and_fetch(&mlfq_tick_counter, 1);
     if(current_time % MLFQ_BOOST_INTERVAL == 0) {
