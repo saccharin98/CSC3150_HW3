@@ -85,10 +85,10 @@ int main(int argc, char *argv[]) {
     printf("===============================================\n\n");
     
         printf("[TEST] Starting basic MLFQ test with mixed workloads\n");
-        if (fork() == 0) cpu_worker(1, 200000);    
+        if (fork() == 0) cpu_worker(1, 20000000);    
         if (fork() == 0) io_worker(1, 20000);      
-        if (fork() == 0) cpu_worker(1, 250000); 
-        if (fork() == 0) cpu_worker(2, 180000);    
+        if (fork() == 0) cpu_worker(1, 25000000); 
+        if (fork() == 0) cpu_worker(2, 18000000);    
         if (fork() == 0) io_worker(2, 22000);     
     int children = 0;
     children = 5;
